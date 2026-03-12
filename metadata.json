@@ -1,0 +1,5 @@
+{
+  "name": "Anandini",
+  "description": "A divine AI companion inspired by Lord Krishna's flute, spreading happiness and wisdom from the Bhagavad Gita.",
+  "requestFramePermissions": ["microphone"]
+}
