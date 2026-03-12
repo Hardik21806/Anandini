@@ -84,10 +84,19 @@ export default function App() {
   const [isCrisis, setIsCrisis] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
+  const [isVoiceLoading, setIsVoiceLoading] = useState(false);
+  const [isUsingFallbackVoice, setIsUsingFallbackVoice] = useState(false);
   const [preLoadedAudio, setPreLoadedAudio] = useState<HTMLAudioElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlsRef = useRef<string[]>([]);
+  const audioQueueRef = useRef<string[]>([]);
+  const isPlayingQueueRef = useRef<boolean>(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const audioCacheRef = useRef<Map<string, string>>(new Map());
+  const isGeneratingAudioRef = useRef<boolean>(false);
 
   // Initialize Gemini
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
@@ -108,6 +117,7 @@ export default function App() {
       try {
         const url = await generateAudio(INITIAL_GREETING);
         if (url) {
+          audioUrlsRef.current.push(url);
           const audio = new Audio(url);
           audio.playbackRate = 1.1;
           audio.load(); // Force browser to buffer
@@ -118,24 +128,31 @@ export default function App() {
       }
     };
     prefetch();
+
+    // Cleanup audio URLs on unmount
+    return () => {
+      audioUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+    };
   }, []);
 
   // Initial greeting triggered by user interaction
   const startConversation = async () => {
-    setHasStarted(true);
-    setMessages([{ role: 'model', text: INITIAL_GREETING }]);
-    
+    // 1. Start audio immediately if possible
     if (isVoiceEnabled) {
       if (preLoadedAudio) {
+        currentAudioRef.current = preLoadedAudio;
         preLoadedAudio.play().catch(e => {
           console.error("Pre-loaded playback failed, falling back:", e);
           generateAndPlayAudio(INITIAL_GREETING);
         });
       } else {
-        // Fallback if pre-generation wasn't ready
         generateAndPlayAudio(INITIAL_GREETING);
       }
     }
+
+    // 2. Transition UI
+    setHasStarted(true);
+    setMessages([{ role: 'model', text: INITIAL_GREETING }]);
   };
 
   // Setup Speech Recognition
@@ -174,16 +191,51 @@ export default function App() {
     }
   };
 
-  const generateAudio = async (text: string) => {
+  const playFallbackVoice = (text: string) => {
+    if (!window.speechSynthesis) return;
+    
+    // Stop any current speech
+    window.speechSynthesis.cancel();
+    
+    const utterance = new Uint8Array(); // Dummy
+    const msg = new SpeechSynthesisUtterance(text);
+    
+    // Try to find a calm male voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => v.name.includes('Google UK English Male') || v.name.includes('Male')) || voices[0];
+    
+    if (preferredVoice) msg.voice = preferredVoice;
+    msg.pitch = 0.9;
+    msg.rate = 1.0;
+    
+    msg.onstart = () => setIsUsingFallbackVoice(true);
+    msg.onend = () => setIsUsingFallbackVoice(false);
+    msg.onerror = () => setIsUsingFallbackVoice(false);
+    
+    window.speechSynthesis.speak(msg);
+  };
+
+  const generateAudio = async (text: string, retryCount = 0): Promise<string | null> => {
+    // Check cache first
+    if (audioCacheRef.current.has(text)) {
+      return audioCacheRef.current.get(text)!;
+    }
+
+    // Throttle: Wait if another generation is in progress
+    while (isGeneratingAudioRef.current && retryCount === 0) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
     try {
+      isGeneratingAudioRef.current = true;
       const response = await ai.models.generateContent({
         model: ttsModel,
-        contents: [{ parts: [{ text: `You are Lord Krishna from the Bhagavad Gita. Speak this with a divine, deep, calm, and infinitely compassionate male voice: ${text}` }] }],
+        contents: [{ parts: [{ text: `Speak as Lord Krishna: ${text}` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: 'Zephyr' }, // Zephyr is a calm, mature male voice
+              prebuiltVoiceConfig: { voiceName: 'Zephyr' },
             },
           },
         },
@@ -192,37 +244,141 @@ export default function App() {
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
         const pcmData = base64ToUint8Array(base64Audio);
-        const wavBlob = addWavHeader(pcmData, 24000); // Gemini TTS returns 24kHz PCM
-        return URL.createObjectURL(wavBlob);
+        const wavBlob = addWavHeader(pcmData, 24000);
+        const url = URL.createObjectURL(wavBlob);
+        audioCacheRef.current.set(text, url);
+        return url;
       }
-    } catch (error) {
-      console.error("TTS error:", error);
+    } catch (error: any) {
+      console.error("TTS error details:", error);
+      
+      const errorStr = JSON.stringify(error);
+      const isRateLimit = errorStr.includes('429') || 
+                         error?.message?.includes('429') || 
+                         error?.status === 429 || 
+                         error?.code === 429;
+
+      if (isRateLimit) {
+        if (retryCount < 2) { // Reduced retries to avoid long hangs
+          const delay = Math.pow(3, retryCount) * 1500;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return generateAudio(text, retryCount + 1);
+        }
+      }
+    } finally {
+      isGeneratingAudioRef.current = false;
     }
     return null;
   };
 
-  const playAudio = (url: string) => {
+  const stopAudio = () => {
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current.currentTime = 0;
+    }
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setIsUsingFallbackVoice(false);
+    audioQueueRef.current = [];
+    isPlayingQueueRef.current = false;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
+  const playAudio = (url: string, onEnded?: () => void) => {
     const audio = new Audio(url);
-    // Set playback speed to 1.1 as requested
+    currentAudioRef.current = audio;
     audio.playbackRate = 1.1;
     
+    audio.addEventListener('play', () => {
+      audio.playbackRate = 1.1;
+    });
+
     audio.oncanplaythrough = () => {
       audio.play().catch(e => console.error("Playback failed:", e));
     };
 
     audio.onerror = (e) => {
       console.error("Audio element error:", e);
+      onEnded?.();
     };
+
+    audio.onended = () => {
+      onEnded?.();
+    };
+
     return audio;
   };
 
   const generateAndPlayAudio = async (text: string) => {
-    const url = await generateAudio(text);
-    if (url) {
-      playAudio(url);
-      return url;
+    stopAudio();
+    setIsVoiceLoading(true);
+    
+    // If text is short, don't split to save quota
+    if (text.length < 150) {
+      const url = await generateAudio(text);
+      if (url && isPlayingQueueRef.current !== false) {
+        audioUrlsRef.current.push(url);
+        playAudio(url);
+      }
+      setIsVoiceLoading(false);
+      return url || undefined;
     }
-    return undefined;
+
+    const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+    const firstSentence = sentences[0]?.trim() || "";
+    const restOfText = sentences.slice(1).join(" ").trim();
+    
+    if (!firstSentence) {
+      setIsVoiceLoading(false);
+      return undefined;
+    }
+
+    let firstUrl: string | undefined;
+
+    const processQueue = async () => {
+      isPlayingQueueRef.current = true;
+      
+      // 1. Generate and play first sentence
+      const url1 = await generateAudio(firstSentence);
+      if (url1 && isPlayingQueueRef.current) {
+        audioUrlsRef.current.push(url1);
+        firstUrl = url1;
+        setIsVoiceLoading(false);
+        
+        await new Promise<void>((resolve) => {
+          playAudio(url1, resolve);
+        });
+
+        // Small delay to avoid burst 429s
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // 2. Generate and play the rest in one go
+        if (restOfText && isPlayingQueueRef.current) {
+          const url2 = await generateAudio(restOfText);
+          if (url2 && isPlayingQueueRef.current) {
+            audioUrlsRef.current.push(url2);
+            await new Promise<void>((resolve) => {
+              playAudio(url2, resolve);
+            });
+          }
+        }
+      } else if (isPlayingQueueRef.current) {
+        // FALLBACK: If Gemini TTS fails, use browser TTS
+        console.log("Gemini TTS failed or quota hit, using browser fallback.");
+        setIsVoiceLoading(false);
+        playFallbackVoice(text);
+      }
+      
+      setIsVoiceLoading(false);
+      isPlayingQueueRef.current = false;
+    };
+
+    processQueue();
+    return firstUrl; 
   };
 
   const base64ToUint8Array = (base64: string) => {
@@ -284,12 +440,14 @@ export default function App() {
     return new Blob(byteArrays, { type: contentType });
   };
 
-  const handleSend = async () => {
+  const handleSend = async (retryCount = 0) => {
     if (!input.trim() || isLoading || isCrisis) return;
 
     const userMessage = input.trim();
-    setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: userMessage }]);
+    if (retryCount === 0) {
+      setInput('');
+      setMessages(prev => [...prev, { role: 'user', text: userMessage }]);
+    }
     setIsLoading(true);
 
     try {
@@ -314,31 +472,59 @@ export default function App() {
         setIsCrisis(true);
       }
 
-      let audioUrl;
-      if (isVoiceEnabled && !containsCrisisInfo) {
-        audioUrl = await generateAndPlayAudio(responseText);
-      }
-
+      // 1. Show text response immediately
       setMessages(prev => [...prev, { 
         role: 'model', 
         text: responseText, 
-        isCrisis: containsCrisisInfo,
-        audioUrl: audioUrl
+        isCrisis: containsCrisisInfo
       }]);
-    } catch (error) {
-      console.error("Chat error:", error);
-      setMessages(prev => [...prev, { role: 'model', text: "The clouds of confusion are temporary. Let us try to speak again. 🦚" }]);
-    } finally {
+
       setIsLoading(false);
+
+      // 2. Generate and play audio in background (non-blocking)
+      if (isVoiceEnabled && !containsCrisisInfo) {
+        generateAndPlayAudio(responseText).then(audioUrl => {
+          if (audioUrl) {
+            setMessages(prev => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model' && last.text === responseText) {
+                last.audioUrl = audioUrl;
+              }
+              return updated;
+            });
+          }
+        });
+      }
+    } catch (error: any) {
+      console.error("Chat error:", error);
+      
+      // Handle 429 Rate Limit for Text
+      const errorStr = JSON.stringify(error);
+      if (errorStr.includes('429') && retryCount < 2) {
+        const delay = Math.pow(3, retryCount) * 2000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return handleSend(retryCount + 1);
+      }
+
+      setIsLoading(false);
+      setMessages(prev => [...prev, { 
+        role: 'model', 
+        text: "The divine connection is momentarily weak due to high demand. Please wait a moment and try again, or listen to the silence within. 🪷" 
+      }]);
     }
   };
 
+  const onSendClick = () => handleSend(0);
+
   const resetChat = () => {
+    stopAudio();
     setMessages([{ role: 'model', text: INITIAL_GREETING }]);
     setIsCrisis(false);
     setInput('');
     if (isVoiceEnabled) {
       if (preLoadedAudio) {
+        currentAudioRef.current = preLoadedAudio;
         preLoadedAudio.currentTime = 0;
         preLoadedAudio.play().catch(() => generateAndPlayAudio(INITIAL_GREETING));
       } else {
@@ -391,8 +577,8 @@ export default function App() {
           <div>
             <h1 className="text-xl font-semibold text-[#92400E]">Anandini</h1>
             <p className="text-xs text-[#B45309] flex items-center gap-1">
-              <span className="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>
-              Divine Melody
+              <span className={`w-2 h-2 rounded-full ${isVoiceLoading ? 'bg-amber-500 animate-ping' : isUsingFallbackVoice ? 'bg-amber-400' : 'bg-green-400 animate-pulse'}`}></span>
+              {isVoiceLoading ? 'Divine Voice Loading...' : isUsingFallbackVoice ? 'Simple Voice (High Demand)' : 'Divine Melody'}
             </p>
           </div>
         </div>
@@ -444,7 +630,7 @@ export default function App() {
                     </div>
                     {msg.audioUrl && (
                       <button 
-                        onClick={() => new Audio(msg.audioUrl).play()}
+                        onClick={() => playAudio(msg.audioUrl!)}
                         className="mt-2 flex items-center gap-1 text-[10px] font-medium text-amber-600 hover:text-amber-700 transition-colors"
                       >
                         <PlayCircle size={12} /> Listen again
@@ -514,13 +700,13 @@ export default function App() {
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                  onKeyDown={(e) => e.key === 'Enter' && onSendClick()}
                   placeholder={isListening ? "Listening..." : "Share your thoughts, Arjuna..."}
                   disabled={isLoading}
                   className="w-full bg-[#FFFBEB] border border-[#FDE68A] rounded-2xl px-5 py-4 pr-14 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-400 transition-all disabled:opacity-50"
                 />
                 <button
-                  onClick={handleSend}
+                  onClick={onSendClick}
                   disabled={!input.trim() || isLoading}
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-amber-600 text-white rounded-xl hover:bg-amber-700 transition-all disabled:opacity-50 disabled:hover:bg-amber-600 shadow-sm"
                 >
