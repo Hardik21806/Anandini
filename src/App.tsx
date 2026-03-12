@@ -90,8 +90,15 @@ export default function App() {
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
 
-  // Initialize Gemini
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+  // Initialize Gemini lazily
+  const getAi = () => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is not configured. Please add it to your secrets.");
+    }
+    return new GoogleGenAI({ apiKey });
+  };
+  
   const model = "gemini-3-flash-preview";
   const ttsModel = "gemini-2.5-flash-preview-tts";
 
@@ -131,8 +138,12 @@ export default function App() {
     }
   };
 
-  // Setup Speech Recognition
+  // Setup Speech Recognition and check API Key
   useEffect(() => {
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn("GEMINI_API_KEY is not configured. Seeking divine guidance may be limited. 🪷");
+    }
+
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
       recognitionRef.current = new SpeechRecognition();
@@ -168,7 +179,9 @@ export default function App() {
   };
 
   const generateAudio = async (text: string) => {
+    if (!isVoiceEnabled || isTtsRateLimited) return null;
     try {
+      const ai = getAi();
       const response = await ai.models.generateContent({
         model: ttsModel,
         contents: [{ parts: [{ text: `You are Anandini, the divine flute of Lord Krishna. Speak this with a divine, serene, and infinitely compassionate female voice: ${text}` }] }],
@@ -226,7 +239,7 @@ export default function App() {
       
       // Try to find a serene female voice
       // Priority: Female English -> Any English
-      const preferredVoice = voices.find(v => v.name.includes('Female') && v.lang.startsWith('en')) ||
+      const preferredVoice = voices.find(v => (v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('woman')) && v.lang.startsWith('en')) ||
                             voices.find(v => (v.name.includes('Google') || v.name.includes('Natural')) && v.lang.startsWith('en')) ||
                             voices.find(v => v.lang.startsWith('en')) ||
                             voices[0];
@@ -349,6 +362,7 @@ export default function App() {
     setIsLoading(true);
 
     try {
+      const ai = getAi();
       const chat = ai.chats.create({
         model: model,
         config: {
@@ -381,9 +395,17 @@ export default function App() {
         isCrisis: containsCrisisInfo,
         audioUrl: audioUrl
       }]);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Chat error:", error);
-      setMessages(prev => [...prev, { role: 'model', text: "The clouds of confusion are temporary. Let us try to speak again. 🦚" }]);
+      let errorMessage = "The clouds of confusion are temporary. Let us try to speak again. 🦚";
+      
+      if (error?.message?.includes("API_KEY") || error?.message?.includes("configured")) {
+        errorMessage = "The divine connection is not yet established. Please ensure the API Key is configured in the settings. 🪷";
+      } else if (error?.status === 429 || error?.code === 429) {
+        errorMessage = "The divine flute is resting for a moment. Please wait a while before seeking guidance again. 🪈";
+      }
+      
+      setMessages(prev => [...prev, { role: 'model', text: errorMessage }]);
     } finally {
       setIsLoading(false);
     }
