@@ -74,6 +74,14 @@ declare global {
     webkitSpeechRecognition: any;
     SpeechRecognition: any;
   }
+
+  interface ImportMetaEnv {
+    readonly VITE_GEMINI_API_KEY?: string;
+  }
+
+  interface ImportMeta {
+    readonly env: ImportMetaEnv;
+  }
 }
 
 export default function App() {
@@ -92,7 +100,7 @@ export default function App() {
 
   // Initialize Gemini lazily
   const getAi = () => {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error("GEMINI_API_KEY is not configured. Please add it to your secrets.");
     }
@@ -140,7 +148,7 @@ export default function App() {
 
   // Setup Speech Recognition and check API Key
   useEffect(() => {
-    if (!process.env.GEMINI_API_KEY) {
+    if (!import.meta.env.VITE_GEMINI_API_KEY) {
       console.warn("GEMINI_API_KEY is not configured. Seeking divine guidance may be limited. 🪷");
     }
 
@@ -375,7 +383,7 @@ export default function App() {
       });
 
       const result = await chat.sendMessage({ message: userMessage });
-      const responseText = result.text || "I am here for you, my friend. Let us find peace together. 🪷";
+      const responseText = (result as any).text || "I am here for you, my friend. Let us find peace together. 🪷";
 
       const crisisKeywords = ["988", "iCall", "crisis helpline"];
       const containsCrisisInfo = crisisKeywords.some(keyword => responseText.includes(keyword));
