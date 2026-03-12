@@ -654,3 +654,4 @@ export default function App() {
     </div>
   );
 }
+console.log("VITE_GEMINI_API_KEY at build/runtime:", import.meta.env.VITE_GEMINI_API_KEY);
