@@ -125,6 +125,7 @@ export default function App() {
       if (preGeneratedGreeting) {
         playAudio(preGeneratedGreeting);
       } else {
+        // Fallback if pre-generation wasn't ready
         generateAndPlayAudio(INITIAL_GREETING);
       }
     }
@@ -184,11 +185,12 @@ export default function App() {
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
         const pcmData = base64ToUint8Array(base64Audio);
-        const wavBlob = addWavHeader(pcmData, 24000); 
+        const wavBlob = addWavHeader(pcmData, 24000); // Gemini TTS returns 24kHz PCM
         setIsTtsRateLimited(false);
         return URL.createObjectURL(wavBlob);
       }
     } catch (error: any) {
+      // Check for rate limit errors (429)
       const isRateLimit = 
         error?.status === 429 || 
         error?.code === 429 || 
@@ -212,30 +214,29 @@ export default function App() {
     const speak = () => {
       window.speechSynthesis.cancel();
       
+      // Clean text for better synthesis (remove emojis and markdown)
       const cleanText = text
         .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '')
         .replace(/[*_#]/g, '')
         .trim();
 
       const utterance = new SpeechSynthesisUtterance(cleanText);
+      
       const voices = window.speechSynthesis.getVoices();
       
-      // IMPROVED: Hard-coded check for female-identified voices in browser fallback
-      const preferredVoice = voices.find(v => 
-        (v.name.includes('Female') || 
-         v.name.includes('Emma') || 
-         v.name.includes('Google UK English Female') || 
-         v.name.includes('Samantha') || 
-         v.name.includes('Microsoft Zira')) && 
-        v.lang.startsWith('en')
-      ) || voices.find(v => v.lang.startsWith('en'));
+      // Try to find a serene female voice
+      // Priority: Female English -> Any English
+      const preferredVoice = voices.find(v => v.name.includes('Female') && v.lang.startsWith('en')) ||
+                            voices.find(v => (v.name.includes('Google') || v.name.includes('Natural')) && v.lang.startsWith('en')) ||
+                            voices.find(v => v.lang.startsWith('en')) ||
+                            voices[0];
 
       if (preferredVoice) {
         utterance.voice = preferredVoice;
       }
 
-      utterance.pitch = 1.1; 
-      utterance.rate = 0.85;  
+      utterance.pitch = 1.1; // Slightly higher for female tone
+      utterance.rate = 0.8;  // 0.8x speed as requested
       utterance.volume = 1.0;
 
       window.speechSynthesis.speak(utterance);
@@ -253,6 +254,7 @@ export default function App() {
 
   const playAudio = (url: string) => {
     const audio = new Audio(url);
+    // Set playback speed to 0.8 as requested
     audio.playbackRate = 0.8;
     
     audio.oncanplaythrough = () => {
@@ -272,7 +274,8 @@ export default function App() {
     if (url) {
       playAudio(url);
       return url;
-    } else {
+    } else if (isTtsRateLimited || !url) {
+      // Fallback to browser TTS if Gemini TTS fails or is rate limited
       speakWithBrowserFallback(text);
     }
     return undefined;
@@ -291,20 +294,50 @@ export default function App() {
   const addWavHeader = (pcmData: Uint8Array, sampleRate: number) => {
     const header = new ArrayBuffer(44);
     const view = new DataView(header);
+    
+    // RIFF identifier 'RIFF'
     view.setUint32(0, 0x52494646, false);
+    // file length
     view.setUint32(4, 36 + pcmData.length, true);
+    // RIFF type 'WAVE'
     view.setUint32(8, 0x57415645, false);
+    // format chunk identifier 'fmt '
     view.setUint32(12, 0x666d7420, false);
+    // format chunk length
     view.setUint32(16, 16, true);
+    // sample format (1 is PCM)
     view.setUint16(20, 1, true);
+    // channel count (1 for mono)
     view.setUint16(22, 1, true);
+    // sample rate
     view.setUint32(24, sampleRate, true);
+    // byte rate (sample rate * block align)
     view.setUint32(28, sampleRate * 2, true);
+    // block align (channel count * bytes per sample)
     view.setUint16(32, 2, true);
+    // bits per sample
     view.setUint16(34, 16, true);
+    // data chunk identifier 'data'
     view.setUint32(36, 0x64617461, false);
+    // data chunk length
     view.setUint32(40, pcmData.length, true);
+
     return new Blob([header, pcmData], { type: 'audio/wav' });
+  };
+
+  const b64toBlob = (b64Data: string, contentType = '', sliceSize = 512) => {
+    const byteCharacters = atob(b64Data);
+    const byteArrays = [];
+    for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
+      const slice = byteCharacters.slice(offset, offset + sliceSize);
+      const byteNumbers = new Array(slice.length);
+      for (let i = 0; i < slice.length; i++) {
+        byteNumbers[i] = slice.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      byteArrays.push(byteArray);
+    }
+    return new Blob(byteArrays, { type: contentType });
   };
 
   const handleSend = async () => {
@@ -404,6 +437,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FFFBF0] text-[#4A4A4A] font-sans selection:bg-[#FDE68A]">
+      {/* Header */}
       <header className="fixed top-0 left-0 right-0 bg-white/90 backdrop-blur-md border-b border-[#F3E5AB] z-10 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-[#FEF3C7] rounded-full flex items-center justify-center text-[#D97706]">
@@ -441,6 +475,7 @@ export default function App() {
         </div>
       </header>
 
+      {/* Main Chat Area */}
       <main className="max-w-3xl mx-auto pt-24 pb-32 px-4 min-h-screen flex flex-col">
         <div className="flex-1 space-y-6" ref={chatContainerRef}>
           <AnimatePresence initial={false}>
@@ -484,24 +519,41 @@ export default function App() {
                         <PlayCircle size={12} /> Listen (Standard Voice)
                       </button>
                     )}
+                    {msg.isCrisis && (
+                      <div className="mt-3 flex items-center gap-2 text-xs font-medium text-red-600 bg-red-100/50 p-2 rounded-lg">
+                        <AlertCircle size={14} />
+                        Crisis Support Active
+                      </div>
+                    )}
                   </div>
                 </div>
               </motion.div>
             ))}
           </AnimatePresence>
+          
           {isLoading && (
-            <div className="flex justify-start">
-              <div className="bg-white border border-[#F3E5AB] px-5 py-3 rounded-2xl rounded-tl-none flex gap-1 items-center">
-                <span className="w-1.5 h-1.5 bg-[#D97706] rounded-full animate-bounce"></span>
-                <span className="w-1.5 h-1.5 bg-[#D97706] rounded-full animate-bounce [animation-delay:0.2s]"></span>
-                <span className="w-1.5 h-1.5 bg-[#D97706] rounded-full animate-bounce [animation-delay:0.4s]"></span>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex justify-start"
+            >
+              <div className="flex gap-3">
+                <div className="w-8 h-8 rounded-full bg-[#FEF3C7] flex items-center justify-center mt-1">
+                  <Sparkles size={16} className="text-[#D97706] animate-spin-slow" />
+                </div>
+                <div className="bg-white border border-[#F3E5AB] px-5 py-3 rounded-2xl rounded-tl-none flex gap-1 items-center">
+                  <span className="w-1.5 h-1.5 bg-[#D97706] rounded-full animate-bounce"></span>
+                  <span className="w-1.5 h-1.5 bg-[#D97706] rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                  <span className="w-1.5 h-1.5 bg-[#D97706] rounded-full animate-bounce [animation-delay:0.4s]"></span>
+                </div>
               </div>
-            </div>
+            </motion.div>
           )}
           <div ref={messagesEndRef} />
         </div>
       </main>
 
+      {/* Input Area */}
       <footer className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t border-[#F3E5AB] p-4 z-10">
         <div className="max-w-3xl mx-auto">
           {isCrisis ? (
@@ -510,13 +562,19 @@ export default function App() {
                 <AlertCircle className="flex-shrink-0" />
                 <p className="text-sm font-medium">Chat is paused for your safety. Please reach out to the helplines provided above.</p>
               </div>
-              <button onClick={resetChat} className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700">Restart Chat</button>
+              <button 
+                onClick={resetChat}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 transition-colors"
+              >
+                Restart Chat
+              </button>
             </div>
           ) : (
             <div className="relative flex items-center gap-2">
               <button
                 onClick={toggleListening}
-                className={`p-4 rounded-2xl transition-all ${isListening ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-amber-100 text-amber-700'}`}
+                className={`p-4 rounded-2xl transition-all ${isListening ? 'bg-red-100 text-red-600 animate-pulse ring-2 ring-red-200' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'}`}
+                title={isListening ? "Stop Listening" : "Voice Input"}
               >
                 {isListening ? <MicOff size={20} /> : <Mic size={20} />}
               </button>
@@ -528,20 +586,41 @@ export default function App() {
                   onKeyDown={(e) => e.key === 'Enter' && handleSend()}
                   placeholder={isListening ? "Listening..." : "Share your thoughts, Arjuna..."}
                   disabled={isLoading}
-                  className="w-full bg-[#FFFBEB] border border-[#FDE68A] rounded-2xl px-5 py-4 focus:outline-none transition-all"
+                  className="w-full bg-[#FFFBEB] border border-[#FDE68A] rounded-2xl px-5 py-4 pr-14 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-400 transition-all disabled:opacity-50"
                 />
                 <button
                   onClick={handleSend}
                   disabled={!input.trim() || isLoading}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-amber-600 text-white rounded-xl"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-amber-600 text-white rounded-xl hover:bg-amber-700 transition-all disabled:opacity-50 disabled:hover:bg-amber-600 shadow-sm"
                 >
                   <Send size={20} />
                 </button>
               </div>
             </div>
           )}
+          <p className="text-[10px] text-center text-[#B45309] mt-3 flex items-center justify-center gap-1">
+            <Info size={10} />
+            Anandini provides spiritual guidance, not a replacement for professional therapy.
+          </p>
         </div>
       </footer>
+
+      {/* Styles for markdown and animations */}
+      <style>{`
+        .animate-spin-slow {
+          animation: spin 3s linear infinite;
+        }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        .prose p {
+          margin-bottom: 0.5rem;
+        }
+        .prose p:last-child {
+          margin-bottom: 0;
+        }
+      `}</style>
     </div>
   );
 }
