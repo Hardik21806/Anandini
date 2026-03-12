@@ -66,7 +66,9 @@ export default function App() {
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
 
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+  // Use the key injected via Vite config
+  const apiKey = (import.meta as any).env?.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '';
+  const ai = new GoogleGenAI(apiKey);
   const model = "gemini-3-flash-preview";
   const ttsModel = "gemini-2.5-flash-preview-tts";
 
@@ -113,6 +115,7 @@ export default function App() {
   };
 
   const generateAudio = async (text: string) => {
+    if (!apiKey) return null;
     try {
       const response = await ai.models.generateContent({
         model: ttsModel,
@@ -130,7 +133,7 @@ export default function App() {
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
         const pcmData = base64ToUint8Array(base64Audio);
-        // MODIFIED: 30000Hz header for 24000Hz data = 0.8x native speed
+        // Interpret 24kHz as 30kHz to slow down playback naturally to 0.8x
         const wavBlob = addWavHeader(pcmData, 30000); 
         setIsTtsRateLimited(false);
         return URL.createObjectURL(wavBlob);
@@ -151,13 +154,12 @@ export default function App() {
     const preferredVoice = voices.find(v => (v.name.includes('Female') || v.name.includes('Google UK English Female')) && v.lang.startsWith('en')) || voices[0];
     if (preferredVoice) utterance.voice = preferredVoice;
     utterance.pitch = 1.1;
-    utterance.rate = 0.8; // Browser fallback speed
+    utterance.rate = 0.8; 
     window.speechSynthesis.speak(utterance);
   };
 
   const playAudio = (url: string) => {
     const audio = new Audio(url);
-    // Removed playbackRate override here to let the custom header handle the speed naturally
     audio.play().catch(e => console.error("Playback failed:", e));
     return audio;
   };
@@ -202,13 +204,17 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const chat = ai.chats.create({
-        model: model,
-        config: { systemInstruction: SYSTEM_INSTRUCTION },
-        history: messages.map(m => ({ role: m.role, parts: [{ text: m.text }] }))
+      const chat = ai.getGenerativeModel({ model: model }).startChat({
+        history: messages.map(m => ({ role: m.role, parts: [{ text: m.text }] })),
+        generationConfig: {
+          maxOutputTokens: 250,
+        },
       });
-      const result = await chat.sendMessage({ message: userMessage });
-      const responseText = result.text;
+
+      // Pass system instruction as a separate prompt if necessary or part of context
+      const result = await chat.sendMessage(SYSTEM_INSTRUCTION + "\n\nUser: " + userMessage);
+      const responseText = await result.response.text();
+      
       const containsCrisisInfo = ["988", "iCall"].some(k => responseText.includes(k));
       if (containsCrisisInfo) setIsCrisis(true);
       
@@ -230,7 +236,8 @@ export default function App() {
           audioUrl: audioBlobUrl 
       }]);
     } catch (error) {
-      setMessages(prev => [...prev, { role: 'model', text: "The clouds of confusion are temporary. Let us try to speak again. 🦚" }]);
+      console.error("Chat error details:", error);
+      setMessages(prev => [...prev, { role: 'model', text: "The clouds of confusion are temporary. Please ensure your API key is correctly set in Vercel settings and try again. 🦚" }]);
     } finally { setIsLoading(false); }
   };
 
@@ -243,77 +250,77 @@ export default function App() {
     }
   };
 
-  if (!hasStarted) {
-    return (
-      <div className="min-h-screen bg-[#FFFBF0] flex items-center justify-center p-6 text-center">
-        <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="max-w-md w-full bg-white rounded-[2rem] shadow-xl border border-[#F3E5AB] p-10 space-y-8">
-          <div className="w-24 h-24 bg-[#FEF3C7] rounded-full flex items-center justify-center text-[#D97706] mx-auto">
-            <Sparkles size={48} fill="currentColor" />
-          </div>
-          <h1 className="text-4xl font-bold text-[#92400E]">Anandini</h1>
-          <button onClick={startConversation} className="w-full py-4 bg-amber-600 text-white rounded-2xl font-semibold text-lg shadow-lg hover:bg-amber-700 transition-all">
-            Begin Your Journey
-          </button>
-        </motion.div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#FFFBF0] text-[#4A4A4A] font-sans selection:bg-[#FDE68A]">
-      <header className="fixed top-0 left-0 right-0 bg-white/90 backdrop-blur-md border-b border-[#F3E5AB] z-10 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Sparkles className="text-[#D97706]" size={24} fill="currentColor" />
-          <h1 className="text-xl font-semibold text-[#92400E]">Anandini</h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setIsVoiceEnabled(!isVoiceEnabled)} className={`p-2 rounded-full ${isVoiceEnabled ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>
-            {isVoiceEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
-          </button>
-          <button onClick={resetChat} className="p-2 text-[#B45309]"><RefreshCw size={20} /></button>
-        </div>
-      </header>
-
-      <main className="max-w-3xl mx-auto pt-24 pb-32 px-4">
-        <div className="space-y-6">
-          <AnimatePresence initial={false}>
-            {messages.map((msg, idx) => (
-              <motion.div key={idx} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`px-5 py-3 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-[#FEF9C3] text-[#78350F]' : 'bg-white border border-[#F3E5AB]'}`}>
-                  <Markdown className="prose prose-sm">{msg.text}</Markdown>
-                  {msg.audioUrl && (
-                    <button onClick={() => new Audio(msg.audioUrl!).play()} className="mt-2 flex items-center gap-1 text-[10px] text-amber-600">
-                      <PlayCircle size={12} /> Listen again
-                    </button>
-                  )}
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
-        <div ref={messagesEndRef} />
-      </main>
-
-      <footer className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t border-[#F3E5AB] p-4">
-        <div className="max-w-3xl mx-auto flex items-center gap-2">
-          <button onClick={toggleListening} className={`p-4 rounded-2xl ${isListening ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-amber-100 text-amber-700'}`}>
-            {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-          </button>
-          <div className="relative flex-1">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              placeholder="Share your thoughts, Arjuna..."
-              className="w-full bg-[#FFFBEB] border border-[#FDE68A] rounded-2xl px-5 py-4 focus:outline-none"
-            />
-            <button onClick={handleSend} className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-amber-600 text-white rounded-xl shadow-sm">
-              <Send size={20} />
+      {!hasStarted ? (
+        <div className="min-h-screen flex items-center justify-center p-6 text-center">
+          <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="max-w-md w-full bg-white rounded-[2rem] shadow-xl border border-[#F3E5AB] p-10 space-y-8">
+            <div className="w-24 h-24 bg-[#FEF3C7] rounded-full flex items-center justify-center text-[#D97706] mx-auto">
+              <Sparkles size={48} fill="currentColor" />
+            </div>
+            <h1 className="text-4xl font-bold text-[#92400E]">Anandini</h1>
+            <button onClick={startConversation} className="w-full py-4 bg-amber-600 text-white rounded-2xl font-semibold text-lg shadow-lg hover:bg-amber-700 transition-all">
+              Begin Your Journey
             </button>
-          </div>
+          </motion.div>
         </div>
-      </footer>
+      ) : (
+        <>
+          <header className="fixed top-0 left-0 right-0 bg-white/90 backdrop-blur-md border-b border-[#F3E5AB] z-10 px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Sparkles className="text-[#D97706]" size={24} fill="currentColor" />
+              <h1 className="text-xl font-semibold text-[#92400E]">Anandini</h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setIsVoiceEnabled(!isVoiceEnabled)} className={`p-2 rounded-full ${isVoiceEnabled ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>
+                {isVoiceEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+              </button>
+              <button onClick={resetChat} className="p-2 text-[#B45309]"><RefreshCw size={20} /></button>
+            </div>
+          </header>
+
+          <main className="max-w-3xl mx-auto pt-24 pb-32 px-4">
+            <div className="space-y-6">
+              <AnimatePresence initial={false}>
+                {messages.map((msg, idx) => (
+                  <motion.div key={idx} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`px-5 py-3 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-[#FEF9C3] text-[#78350F]' : 'bg-white border border-[#F3E5AB]'}`}>
+                      <Markdown className="prose prose-sm">{msg.text}</Markdown>
+                      {msg.audioUrl && (
+                        <button onClick={() => new Audio(msg.audioUrl!).play()} className="mt-2 flex items-center gap-1 text-[10px] text-amber-600">
+                          <PlayCircle size={12} /> Listen again
+                        </button>
+                      )}
+                    </div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+            <div ref={messagesEndRef} />
+          </main>
+
+          <footer className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t border-[#F3E5AB] p-4">
+            <div className="max-w-3xl mx-auto flex items-center gap-2">
+              <button onClick={toggleListening} className={`p-4 rounded-2xl ${isListening ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-amber-100 text-amber-700'}`}>
+                {isListening ? <MicOff size={20} /> : <Mic size={20} />}
+              </button>
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                  placeholder="Share your thoughts..."
+                  className="w-full bg-[#FFFBEB] border border-[#FDE68A] rounded-2xl px-5 py-4 focus:outline-none"
+                />
+                <button onClick={handleSend} className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-amber-600 text-white rounded-xl shadow-sm">
+                  <Send size={20} />
+                </button>
+              </div>
+            </div>
+          </footer>
+        </>
+      )}
     </div>
   );
 }
