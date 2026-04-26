@@ -18,7 +18,10 @@ import {
   MicOff,
   Volume2,
   VolumeX,
-  PlayCircle
+  PlayCircle,
+  Instagram,
+  Github,
+  Linkedin
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -74,14 +77,6 @@ declare global {
     webkitSpeechRecognition: any;
     SpeechRecognition: any;
   }
-
-  interface ImportMetaEnv {
-    readonly VITE_GEMINI_API_KEY?: string;
-  }
-
-  interface ImportMeta {
-    readonly env: ImportMetaEnv;
-  }
 }
 
 export default function App() {
@@ -100,9 +95,13 @@ export default function App() {
 
   // Initialize Gemini lazily
   const getAi = () => {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    // Check multiple possible environment variable names to avoid "reserved name" issues
+    const apiKey = process.env.GEMINI_API_KEY || 
+                   (import.meta as any).env?.VITE_GEMINI_API_KEY || 
+                   process.env.VITE_GEMINI_API_KEY;
+                   
     if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not configured. Please add it to your secrets.");
+      throw new Error("API Key not found. Please add 'GEMINI_API_KEY' or 'VITE_GEMINI_API_KEY' to your secrets.");
     }
     return new GoogleGenAI({ apiKey });
   };
@@ -148,8 +147,12 @@ export default function App() {
 
   // Setup Speech Recognition and check API Key
   useEffect(() => {
-    if (!import.meta.env.VITE_GEMINI_API_KEY) {
-      console.warn("GEMINI_API_KEY is not configured. Seeking divine guidance may be limited. 🪷");
+    const apiKey = process.env.GEMINI_API_KEY || 
+                   (import.meta as any).env?.VITE_GEMINI_API_KEY || 
+                   process.env.VITE_GEMINI_API_KEY;
+
+    if (!apiKey) {
+      console.warn("API Key is not configured. Seeking divine guidance may be limited. 🪷");
     }
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -186,13 +189,28 @@ export default function App() {
     }
   };
 
+  const cleanTextForTTS = (text: string) => {
+    return text
+      .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '') // Remove emojis
+      .replace(/\*\*/g, '') // Remove bold
+      .replace(/\*/g, '') // Remove italic
+      .replace(/#/g, '') // Remove headers
+      .replace(/`{1,3}[^`]*`{1,3}/g, '') // Remove code blocks
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Remove links but keep text
+      .trim();
+  };
+
   const generateAudio = async (text: string) => {
     if (!isVoiceEnabled || isTtsRateLimited) return null;
+    
+    const cleanedText = cleanTextForTTS(text);
+    if (!cleanedText) return null;
+
     try {
       const ai = getAi();
       const response = await ai.models.generateContent({
         model: ttsModel,
-        contents: [{ parts: [{ text: `You are Anandini, the divine flute of Lord Krishna. Speak this with a divine, serene, and infinitely compassionate female voice: ${text}` }] }],
+        contents: [{ parts: [{ text: cleanedText }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -235,13 +253,11 @@ export default function App() {
     const speak = () => {
       window.speechSynthesis.cancel();
       
-      // Clean text for better synthesis (remove emojis and markdown)
-      const cleanText = text
-        .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '')
-        .replace(/[*_#]/g, '')
-        .trim();
+      const cleanText = cleanTextForTTS(text);
+      if (!cleanText) return;
 
       const utterance = new SpeechSynthesisUtterance(cleanText);
+      utterance.rate = 0.8; // Match the meditative pace
       
       const voices = window.speechSynthesis.getVoices();
       
@@ -383,7 +399,7 @@ export default function App() {
       });
 
       const result = await chat.sendMessage({ message: userMessage });
-      const responseText = (result as any).text || "I am here for you, my friend. Let us find peace together. 🪷";
+      const responseText = result.text || "I am here for you, my friend. Let us find peace together. 🪷";
 
       const crisisKeywords = ["988", "iCall", "crisis helpline"];
       const containsCrisisInfo = crisisKeywords.some(keyword => responseText.includes(keyword));
@@ -449,6 +465,20 @@ export default function App() {
             <p className="text-[#78350F] text-sm leading-relaxed">
               Step into a space of divine guidance and inner peace. Hear the melody of Anandini, Krishna's flute, to navigate the challenges of your mind.
             </p>
+            <div className="pt-4 border-t border-[#F3E5AB]">
+              <p className="text-xs text-[#B45309] font-medium mb-2">Made with ❤️ by Hardik Manglani</p>
+              <div className="flex justify-center gap-4">
+                <a href="https://www.instagram.com/hardik_manglani21/" target="_blank" rel="noopener noreferrer" className="text-amber-600 hover:text-amber-700 transition-colors">
+                  <Instagram size={18} />
+                </a>
+                <a href="https://github.com/Hardik21806" target="_blank" rel="noopener noreferrer" className="text-amber-600 hover:text-amber-700 transition-colors">
+                  <Github size={18} />
+                </a>
+                <a href="https://www.linkedin.com/in/hardik-manglani-152b04330/" target="_blank" rel="noopener noreferrer" className="text-amber-600 hover:text-amber-700 transition-colors">
+                  <Linkedin size={18} />
+                </a>
+              </div>
+            </div>
           </div>
           <button 
             onClick={startConversation}
@@ -477,7 +507,7 @@ export default function App() {
             <h1 className="text-xl font-semibold text-[#92400E]">Anandini</h1>
             <p className="text-xs text-[#B45309] flex items-center gap-1">
               <span className="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>
-              Divine Melody
+              Divine Melody • By Hardik
             </p>
           </div>
         </div>
@@ -628,9 +658,25 @@ export default function App() {
               </div>
             </div>
           )}
-          <p className="text-[10px] text-center text-[#B45309] mt-3 flex items-center justify-center gap-1">
-            <Info size={10} />
-            Anandini provides spiritual guidance, not a replacement for professional therapy.
+          <p className="text-[10px] text-center text-[#B45309] mt-3 flex flex-col items-center gap-2">
+            <span className="flex items-center gap-1">
+              <Info size={10} />
+              Anandini provides spiritual guidance, not a replacement for professional therapy.
+            </span>
+            <span className="flex items-center gap-3 mt-1">
+              <span className="opacity-70">Made by Hardik Manglani</span>
+              <span className="flex gap-2">
+                <a href="https://www.instagram.com/hardik_manglani21/" target="_blank" rel="noopener noreferrer" className="hover:text-amber-700 transition-colors">
+                  <Instagram size={12} />
+                </a>
+                <a href="https://github.com/Hardik21806" target="_blank" rel="noopener noreferrer" className="hover:text-amber-700 transition-colors">
+                  <Github size={12} />
+                </a>
+                <a href="https://www.linkedin.com/in/hardik-manglani-152b04330/" target="_blank" rel="noopener noreferrer" className="hover:text-amber-700 transition-colors">
+                  <Linkedin size={12} />
+                </a>
+              </span>
+            </span>
           </p>
         </div>
       </footer>
@@ -654,4 +700,3 @@ export default function App() {
     </div>
   );
 }
-console.log("VITE_GEMINI_API_KEY at build/runtime:", import.meta.env.VITE_GEMINI_API_KEY);
